@@ -11,38 +11,57 @@
 # Solution:
 # Use Switch Statements to Branch 
 
-EWMA_Find_CL_Slow <- function(ic_data = rnorm(500),
-                         lambda = .05,
-                         control_limit = .12,
-                         m = 5,
-                         ICdist = "rnorm",
-                         IC_dist_ops = NULL,
-                         bootstrap_samples = 3000,
-                         test_stat = "cvm") {
-  # Calculate d0 via bootstrapping
-  D_n <- numeric(bootstrap_samples)
-  for (i in 1:bootstrap_samples) {
-    sampled_data <- sample(ic_data, replace = T, size = m)
-    D_n[i] <- test_stat(ic_data, sampled_data)
-  }
-  d0 = mean(D_n)
-  # Initializing Variables
-  data <- NULL
-  u <- 0
-  i <- 0
-  j <- 1:m
-  rIC <- get(ICdist, mode = "function", envir = parent.frame())
+CL_Finding_With_UB <- function(allow_param, cl_seq, f_in_control, sd_tol_init, Cores=4){
+  # allow_param = Allowance Parameter value
+  # cl_seq = control limit sequence of values to be evaluated
+  # f_in_control = What function to use
+  # INTERNAL USE ONLY
+  # FOR NOW, SET N2, N2_MIN, ETC. OUTSIDE OF THE FUNCTION
   
-  while (tail(u, 1) < control_limit) {
-    i <- i + 1
-    data <- do.call(rIC, c(list(m), IC_dist_ops))
+  N2_max <- 15000 # Run a maximum of this many times
+  N2_min <- 500 # Run for at least 500 times
+  
+  upper.bound.ucl <- max(cl_seq)
+  num_candidates <- length(cl_seq)
+  
+  Iterations <- 0
+  sd_arl <- sd_tol_init + 1 
+  Num_Iter <- 5 * Cores
+  require(doMC)
+  require(foreach)
+  N2 <- 0 # At least 300 runs
+  arl_track <- NULL
+  while(sd_arl > sd_tol_init){
+    # print(paste("sd_arl was", sd_arl, "sd_tol_init was", sd_tol_init))
+    par_obj <- foreach(n=1:Num_Iter) %dopar%{
+      RLs <- f_in_control(control_limit=max(cl_seq), 
+                          lambda=allow_param, 
+                          m=m,
+                          ic_data=rdist(M),
+                          track_candidates = cl_seq)
+      current_run_length <- RLs[["Time OOC"]]
+      names(current_run_length) <- as.character(upper.bound.ucl)
+      lower_cls <- RLs[["Lower CLs"]]
+      all_RLs <- c(current_run_length, lower_cls)
+    }
+    par_obj = matrix(unlist(par_obj), nrow=num_candidates+1, byrow=FALSE)
+    arl_track <- cbind(arl_track, par_obj) # arl_track is now a matrix
+    N2 <- N2 + Num_Iter
+    sd_arl <- sd(arl_track[1, ])* 1.96 / sqrt(N2) # First row contains most relevent info
+    arl_est <- mean(arl_track[1, ] ) 
     
+    if(is.na(sd_arl)) sd_arl <- sd_tol_init + 1
     
-    D_n <- test_stat(ic_data, data)
-    u_nK <- lambda * (D_n - d0) + (1 - lambda) * tail(u, 1)
-    u <- append(u, u_nK)
+    if(N2 < N2_min) sd_arl <- sd_tol_init + 1
+    if(N2 > N2_max) sd_arl <- sd_tol_init - 1 # goes to far, just need to cut it off
+    if(N2 %% 40==0){
+      print(N2)
+      print(arl_est)
+      print(sd_arl)
+    }
   }
-  return(list("control_stats" = u, "Time OOC" = i))
+  rownames(arl_track) <- as.character(c(upper.bound.ucl,cl_seq))
+  return(arl_track)
 }
 
 EWMA_Find_CL_CVM <- function(ic_data = rnorm(500),
@@ -97,6 +116,60 @@ EWMA_Find_CL_CVM <- function(ic_data = rnorm(500),
   return(list("control_stats" = u, "Time OOC" = i))
 }
 
+EWMA_Find_CL_KS <- function(ic_data = rnorm(500),
+                             lambda = .05,
+                             control_limit = .06,
+                             m = 5,
+                             ICdist = "rnorm",
+                             IC_dist_ops = NULL,
+                             bootstrap_samples = 3000,
+                             track_candidates=NULL) {
+  # See below for track_candidates explanation
+  
+  # Calculate d0 via bootstrapping
+  d0 <- Fast_Bootstrap_KS(ic_data=ic_data, m=m, bootstrap_samples=bootstrap_samples)
+  
+  # Initializing Variables
+  data <- NULL
+  u <- 0 # initialize first value at 0
+  i <- 0
+  j <- 1:m
+  rIC <- get(ICdist, mode = "function", envir = parent.frame())
+  
+  # Pre Calculations for functions
+  ## sorted_ic_data <- sort(ic_data) # No longer needed for KS
+  ic_fun <- ecdf(ic_data)
+  len_ic <- length(ic_data)
+  
+  
+  ind <- 1:len_ic
+  
+  while (tail(u, 1) < control_limit) {
+    i <- i + 1
+    data <- do.call(rIC, c(list(m), IC_dist_ops))
+    # Calculate new value of test statisic
+    D_n <- Fast_TS_KS(ic_fun=ic_fun, new_data=data,
+                       j=j, m=m)
+    # print(D_n)
+    u_nK <- lambda * (D_n - d0) + (1 - lambda) * tail(u, 1)
+    # print(paste("u=",u_nK))
+    u <- append(u, u_nK)
+  }
+  
+  # If we have a large upper bound, we can calculate all our upper bounds below that number
+  if(!is.null(track_candidates)){
+    track_ucl <-numeric(length(track_candidates))
+    
+    for(j in seq_along(track_candidates)){
+      track_ucl[j] <- as.numeric(which.min(track_candidates[j] > u)) - 1 #investigate later
+    }
+    names(track_ucl) <- as.character(track_candidates)
+    return(list("Time OOC"=i, "Lower CLs"=track_ucl))
+    
+  }
+  return(list("control_stats" = u, "Time OOC" = i))
+}
+
 Fast_Bootstrap_CVM <- function(ic_data, m, bootstrap_samples){
   # This is inaccurate (5/5/2016)
   # Possibly because of ties
@@ -106,7 +179,6 @@ Fast_Bootstrap_CVM <- function(ic_data, m, bootstrap_samples){
   i <- 1:lenx
   leny <- m
   j <- 1:leny
-  sd_data <- sd(ic_data)
   for (k in 1:bootstrap_samples) {
     sampled_data <- sort.int(sample(ic_data, replace = T, size = m))
     #sampled_data <- sampled_data + rnorm(m, 0, .01*sd_data)
@@ -119,6 +191,20 @@ Fast_Bootstrap_CVM <- function(ic_data, m, bootstrap_samples){
   d0 = mean(D_n)
 }
 
+
+Fast_Bootstrap_KS <- function(ic_data, m, bootstrap_samples){
+  # Tested 9/15/2016
+  fhat_ic <- ecdf(ic_data)
+  j <- 1:m
+  D_n <- numeric(bootstrap_samples)
+  for(i in 1:bootstrap_samples){
+    f0 <- fhat_ic(sort.int(sample(ic_data, replace=T, size=m)))
+    D_n[i] <-  max(f0 - (j - 1) / m, j / m - f0)
+  }
+  d0=mean(D_n)
+ }
+
+
 In_Control_Dist_CvM <- function(ic_data, m, bootstrap_samples){
   # This is inaccurate (5/5/2016)
   # Possibly because of ties
@@ -129,7 +215,7 @@ In_Control_Dist_CvM <- function(ic_data, m, bootstrap_samples){
   leny <- m
   j <- 1:leny
   sd_data <- sd(ic_data)
-  for (k in 1:bootstrap_samples) {
+  for(k in 1:bootstrap_samples) {
     sampled_data <- sort.int(sample(ic_data, replace = T, size = m))
     #sampled_data <- sampled_data + rnorm(m, 0, .01*sd_data)
     #sampled_data <- rnorm(5)
@@ -150,16 +236,13 @@ In_Control_Dist_CvM_Exp <- function(ic_data, m, bootstrap_samples, ICdist, ic_pa
   i <- 1:lenx
   leny <- m
   j <- 1:leny
-  sd_data <- sd(ic_data)
-  
+
   # Newly simulated data
   rIC <- get(ICdist, mode = "function", envir = parent.frame())
   # new_data <- (lenx) # breaks upon usage of anything other than default params
   # new_data <- do.call(ic_dist, c(list(lenx), ic_params)) 
-  
-  
-  
-  for (k in 1:bootstrap_samples) {
+
+  for(k in 1:bootstrap_samples) {
     sampled_data <- do.call(rIC, c(list(m), ic_params))  #NOW A MISNOMER
     # sampled_data <- sort.int(sample(new_data, replace = T, size = m))
     #sampled_data <- sampled_data + rnorm(m, 0, .01*sd_data)
@@ -172,22 +255,20 @@ In_Control_Dist_CvM_Exp <- function(ic_data, m, bootstrap_samples, ICdist, ic_pa
   D_n
 }
 
-
-# 
-# Fast_Bootstrap_CVM_Ties <- function(ic_data, m, bootstrap_samples){
-#   # Trying to make this compatiable with ties
-#   D_n <- numeric(bootstrap_samples)
-#   sort_ic <- sort(ic_data)
-#   lenx <- length(ic_data)
-#   rankx <- rank(sort_ic)
-#   for (i in 1:bootstrap_samples) {
-#     sampled_data <- sort.int(sample(ic_data, replace = T, size = m))
-#     ranks <- rank(c(sort_ic, sampled_data))
-#     U <- lenx * sum((ranks[1:lenx] - i)^2) + leny * sum((ranks[(lenx + 1):(lenx + leny)] - j)^2)
-#     D_n[i] <- U / ((lenx * leny)*(lenx + leny)) - (4 * leny * lenx - 1)/(6 * (leny + lenx))
-#   }
-#   d0 = mean(D_n)
-# }
+In_Control_Dist_KS_Exp <- function(ic_data, m, bootstrap_samples, ICdist, ic_params){
+  # 
+  D_n <- numeric(bootstrap_samples)
+  fhat_ic <- ecdf(ic_data)
+  j <- 1:m
+  # Newly simulated data
+  rIC <- get(ICdist, mode = "function", envir = parent.frame())
+  for(k in 1:bootstrap_samples) {
+    sampled_data <- do.call(rIC, c(list(m), ic_params))  #NOW A MISNOMER
+    f0 <- fhat_ic(sort.int(sample(ic_data, replace=T, size=m)))
+    D_n[k] <-  max(f0 - (j - 1) / m, j / m - f0)
+  }
+  D_n
+}
 
 
 Fast_TS_CVM <- function(sorted_ic_data, new_data, lenx, i, j, leny){
@@ -197,12 +278,23 @@ Fast_TS_CVM <- function(sorted_ic_data, new_data, lenx, i, j, leny){
   STAT <- U / ((lenx * leny)*(lenx + leny)) - (4 * leny * lenx - 1)/(6 * (leny + lenx))
 }
 
+Fast_TS_KS <- function(ic_fun, new_data, j, m){
+ # Internal use ONLY 
+  new_data <- sort(new_data)
+  f0 <- ic_fun(new_data)
+  max(f0-(j-1)/m, j/m- f0)
+}
+
+
+
 
 EWMA_CVM_OOC <- function(ic_data=rnorm(500), lambda=.05, control_limit, m=5, exact=FALSE, 
                           tau=0, 
                           ICdist="rnorm", IC_dist_ops=NULL,
                           OOCdist="rnorm", OOC_dist_ops=NULL,
                           bootstrap_samples=3000){
+  # TODO: Add multicore support
+  
   # Calculate d0 via bootstrapping
   d0 <- Fast_Bootstrap_CVM(ic_data=ic_data, m=m, bootstrap_samples=bootstrap_samples)
   
@@ -238,6 +330,54 @@ EWMA_CVM_OOC <- function(ic_data=rnorm(500), lambda=.05, control_limit, m=5, exa
   }
   return(list("control_stats" = u, "Time OOC" = i))
 }
+
+
+
+EWMA_KS_OOC <- function(ic_data=rnorm(500), lambda=.05, control_limit, m=5, exact=FALSE, 
+                         tau=0, 
+                         ICdist="rnorm", IC_dist_ops=NULL,
+                         OOCdist="rnorm", OOC_dist_ops=NULL,
+                         bootstrap_samples=3000){
+  # TODO: Add multicore support
+  
+  # Calculate d0 via bootstrapping
+  d0 <- Fast_Bootstrap_KS(ic_data=ic_data, m=m, bootstrap_samples=bootstrap_samples)
+  
+  # Initializing Variables
+  data <- NULL
+  u <- 0
+  i <- 0
+  j <- 1:m
+  rOOC <- get(OOCdist, mode = "function", envir = parent.frame())
+  rIC <- get(ICdist, mode = "function", envir = parent.frame())
+  
+  # Pre Calculations for functions
+  ic_fun <- ecdf(ic_data)
+  len_ic <- length(ic_data)
+
+  
+  while (tail(u, 1) < control_limit) {
+    i <- i + 1
+    if(i <= tau){
+      data <-  do.call(rIC, c(list(m), IC_dist_ops) ) 
+      
+    }else{
+      data <- do.call(rOOC, c(list(m), OOC_dist_ops)) 
+    }
+    # Calculate new value of test statisic
+    D_n <- Fast_TS_KS(ic_fun=ic_fun, new_data=data,
+                      j=j, m=m)
+    # print(D_n)
+    u_nK <- lambda * (D_n - d0) + (1 - lambda) * tail(u, 1)
+    # print(paste("u=",u_nK))
+    u <- append(u, u_nK)
+  }
+  return(list("control_stats" = u, "Time OOC" = i))
+}
+
+##### Core Functions End Here #####
+
+
 
 
 Iterative_CL_Finding <- function(allow_param, cl_seq, f_in_control, margin_error){
@@ -320,69 +460,6 @@ Iterative_CL_Finding <- function(allow_param, cl_seq, f_in_control, margin_error
               "Number of Iterations Required for Convergence"=Iterations))
 }
 
-
-CL_Finding_With_UB <- function(allow_param, cl_seq, f_in_control, sd_tol_init, Cores=4){
-  # allow_param = Allowance Parameter value
-  # cl_seq = control limit sequence of values to be evaluated
-  # f_in_control = What function to use
-  # INTERNAL USE ONLY
-  # FOR NOW, SET N2, N2_MIN, ETC. OUTSIDE OF THE FUNCTION
-  
-  N2 <- 10000
-  N2_min <- 500
-  
-  
-  upper.bound.ucl <- max(cl_seq)
-  num_candidates <- length(cl_seq)
-    Iterations <- 0
-  sd_arl <- sd_tol_init + 1 
-  Num_Iter <- 5 * Cores
-  require(doMC)
-  require(foreach)
-  N2 <- 0 # At least 300 runs
-  arl_track <- NULL
-  while(sd_arl > sd_tol_init){
-    print(paste("sd_arl was", sd_arl, "sd_tol_init was", sd_tol_init))
-    par_obj <- foreach(n=1:Num_Iter) %dopar%{
-      RLs <- f_in_control(control_limit=max(cl_seq), 
-                          lambda=allow_param, m=5,
-                          ic_data=rdist(M),
-                          track_candidates = cl_seq)
-      current_run_length <- RLs[["Time OOC"]]
-      names(current_run_length) <- as.character(upper.bound.ucl)
-      lower_cls <- RLs[["Lower CLs"]]
-      all_RLs <- c(current_run_length, lower_cls)
-    }
-    par_obj = matrix(unlist(par_obj), nrow=num_candidates+1, byrow=FALSE)
-    arl_track <- cbind(arl_track, par_obj) # arl_track is now a matrix
-    N2 <- N2 + Num_Iter
-    sd_arl <- sd(arl_track[1, ])* 1.96 / sqrt(N2) # First row contains most relevent info
-    arl_est <- mean(arl_track[1, ] ) 
-    
-    # Old Vector Code
-    # par_obj <- unlist(par_obj)
-    # print(par_obj)
-    # arl_track <- append(arl_track, par_obj) # Keeps track of our OOC times at the current UCL
-    # N2 <- N2 + Num_Iter
-    # sd_arl <- sd(arl_track)* 1.96 / sqrt(N2)
-    # arl_est <- mean(arl_track) # Takes the mean of the OOC times
-    
-    if(is.na(sd_arl)) sd_arl <- sd_tol_init + 1
-    
-    if(N2 < N2_min) sd_arl <- sd_tol_init + 1
-    if(N2 > N2_max) sd_arl <- sd_tol_init - 1 # goes to far, just need to cut it off
-    if(N2 %% 40==0){
-      print(N2)
-      print(arl_est)
-      print(sd_arl)
-      #print(arl_track)
-      #time_ic[j] <- mean(arl_track)
-      
-    }
-  }
-  rownames(arl_track) <- as.character(c(upper.bound.ucl,cl_seq))
-  return(arl_track)
-}
 
 Iterative_CL_Finding_MC <- function(allow_param, cl_seq, f_in_control, margin_error, Cores=4){
   # allow_param = Allowance Parameter value
@@ -602,186 +679,52 @@ Initial_CL_Approx_CVM <- function(num_candidates = 30,
   
 }
 
+EWMA_Find_CL_Slow <- function(ic_data = rnorm(500),
+                              lambda = .05,
+                              control_limit = .12,
+                              m = 5,
+                              ICdist = "rnorm",
+                              IC_dist_ops = NULL,
+                              bootstrap_samples = 3000,
+                              test_stat = "cvm") {
+  # Calculate d0 via bootstrapping
+  D_n <- numeric(bootstrap_samples)
+  for (i in 1:bootstrap_samples) {
+    sampled_data <- sample(ic_data, replace = T, size = m)
+    D_n[i] <- test_stat(ic_data, sampled_data)
+  }
+  d0 = mean(D_n)
+  # Initializing Variables
+  data <- NULL
+  u <- 0
+  i <- 0
+  j <- 1:m
+  rIC <- get(ICdist, mode = "function", envir = parent.frame())
+  
+  while (tail(u, 1) < control_limit) {
+    i <- i + 1
+    data <- do.call(rIC, c(list(m), IC_dist_ops))
+    
+    
+    D_n <- test_stat(ic_data, data)
+    u_nK <- lambda * (D_n - d0) + (1 - lambda) * tail(u, 1)
+    u <- append(u, u_nK)
+  }
+  return(list("control_stats" = u, "Time OOC" = i))
+}
+
 # 
-# # Stored 5/25/2016 
-# newcl_cvm <- function(num_candidates=30,
-#                       ARL = 200,
-#                       bootstrap_samples = 5000,
-#                       ic_sample_size = 2000,
-#                       allowance_parameter = .05,
-#                       ic_dist="rnorm",
-#                       ic_params=list(mean=0, sd=1),
-#                       runs = 1000,
-#                       avg_runs = 14){
-#   # TO DO: 
-#   #  CHANGE UPPER RUN LIMIT DEPENDING ON ARL
-#   cl_est <- numeric(avg_runs)
-#   ic_dist <- get(ic_dist, mode = "function", envir = parent.frame())
-#   
-#   for(count_i in 1:avg_runs){
-#     ic_data <- do.call(ic_dist, c(list(ic_sample_size), ic_params)) 
-#     
-#     # bootstrap sample from that in control data to get distribution of test statistic
-#     in_control_tstat <- In_Control_Dist_CvM(ic_data=ic_data, m=5, bootstrap_samples=bootstrap_samples)
-#     # get mean of the distribution
-#     mean_ic_tstat <- mean(in_control_tstat)
-#     
-#     # Upper run limit depends on what ARL you want to estimate
-#     p <- (1/ARL)
-#     sd_p <- sqrt((1-p)/p^2)
-#     upper_run_limit <- ARL + 15 * sd_p # yields 4000 when ARL=200
-#     # 10000 when ARL=500 (Could use some testing later)
-#     
-#     # number of runs is ad hoc right now
-#     
-#     # Pre-allocating
-#     x <- numeric(upper_run_limit)
-#     cc <- matrix(nrow = runs, ncol=num_candidates)
-#     matRuns <- matrix(nrow=runs, ncol=upper_run_limit)
-#     
-#     # Get control limit estimates by using the bootstrapped in control distribution
-#     # for the test statistic
-#     
-#     for(i in 1:runs){
-#       x <- numeric(upper_run_limit)
-#       tstat_chosen <- sample(in_control_tstat, upper_run_limit) # Faster to do this earlier
-#       for(j in 2:upper_run_limit){
-#         #tstat_chosen <- sample(in_control_tstat, 1)
-#         x[j] <- allowance_parameter * (tstat_chosen[j] - mean_ic_tstat) + (1 - allowance_parameter)*x[j - 1]
-#       }
-#       matRuns[i, ] <- x
-#     }
-#     maxes <- apply(matRuns, 1, max)
-#     min_max <- min(maxes) # This is our jumpoff point for estimating control limits
-#     lcl <- 0
-#     ucl <- min_max
-#     # Later, we will need a lot of error checking here
-#     cl_cand <- seq(lcl, ucl, length.out=num_candidates)
-#     
-#     for(i in 1:runs){
-#       cc[i,] <- sapply(cl_cand, function(cl_cand) min(which(matRuns[i,] >= cl_cand)))
-#     }
-#     
-#     # averaging over all the runs
-#     arl_candidates <- colMeans(cc)
-#     
-#     # plot(cl_cand, colMeans(cc))
-#     # f <- approxfun(cl_cand,arl_candidates)
-#     f_in <- approxfun(arl_candidates, cl_cand)
-#     control_limit_estimate <- f_in(ARL)
-#     cl_est[count_i] <- control_limit_estimate
-#     print(count_i/avg_runs)
+# Fast_Bootstrap_CVM_Ties <- function(ic_data, m, bootstrap_samples){
+#   # Trying to make this compatiable with ties
+#   D_n <- numeric(bootstrap_samples)
+#   sort_ic <- sort(ic_data)
+#   lenx <- length(ic_data)
+#   rankx <- rank(sort_ic)
+#   for (i in 1:bootstrap_samples) {
+#     sampled_data <- sort.int(sample(ic_data, replace = T, size = m))
+#     ranks <- rank(c(sort_ic, sampled_data))
+#     U <- lenx * sum((ranks[1:lenx] - i)^2) + leny * sum((ranks[(lenx + 1):(lenx + leny)] - j)^2)
+#     D_n[i] <- U / ((lenx * leny)*(lenx + leny)) - (4 * leny * lenx - 1)/(6 * (leny + lenx))
 #   }
-#   cl_est_mean <- mean(cl_est)
+#   d0 = mean(D_n)
 # }
-# Depricated 
-# Estimate_Control_Limit_EWMA_Gamma <-
-#   function(M,
-#            rdist=rgamma,
-#            m,
-#            ARL,
-#            tstat,
-#            allowance_parameter,
-#            reps = 1000,
-#            lowerARL = NULL,
-#            upperARL = NULL) {
-#     # Code is obviously verbose, but whatever
-#     # Only one allowance parameter value allowed
-#     #rdist should be a character
-#     if(is.null(lowerARL)) lowerARL <- ARL - (ARL/5)
-#     if(is.null(upperARL)) upperARL <- ARL + (ARL/5)
-#     
-#     tstat_parameters <- Estimate_Allowance_Gamma(
-#       ic_dist = "rnorm",
-#       M = M,
-#       bootstrap_samples = 2500,
-#       tstat = tstat,
-#       m = m
-#     )
-#     
-#     tshape <- tstat_parameters[1]
-#     trate <- tstat_parameters[2]
-#     tmean <- tstat_parameters[3]
-#     if (is.character(rdist)) {
-#       rdist <- get(rdist, mode = "function", envir = parent.frame())
-#     }
-#     #len <- ARL
-#     len <- c(ARL, lowerARL, upperARL)
-#     #names(len) <- c("ARL", "lowerARL", "upperARL")
-#     print(len)
-#     ucl_guess <- numeric(length(len))
-#     names(ucl_guess) <- c("ARL", "lowerARL", "upperARL")
-#     
-#     for(i in seq_along(len)){
-#       max_x <- numeric(reps)
-#       
-#      for(j in 1:reps){
-#        temp_len <- len[i]
-#        x <- numeric(temp_len)
-#        
-#        for(k in 2:temp_len){
-#          temp <- rdist(1, shape=tshape, rate=trate)
-# 
-# 
-#          x[k] <- allowance_parameter * (temp-tmean) + (1-allowance_parameter)*x[k-1]
-#          #x[k] <- allowance_parameter * ( rdist(1, shape=tshape, rate=trate) - tmean)
-#         #                          + (1 - allowance_parameter) * x[k-1]
-#          
-#        }
-#        max_x[j] <- max(x)
-#       }
-#       ucl_guess[i] <- mean(max_x)
-#     }
-#     
-#     return(list("Estimated Control Limit Mean"=ucl_guess["ARL"],
-#                 "Estimated Control Limit UB"=ucl_guess["lowerARL"],
-#                 "Estimated Control Limit LB"=ucl_guess["upperARL"]))
-#     
-#   }
-
-# Depricated 
-# newccfun <- function(num_candidates=30, 
-#                      lcl=.03, 
-#                      ucl=.055, 
-#                      bootstrap_samples=5000, 
-#                      ic_sample_size=2000,
-#                      allowance_parameter=.05){
-#   # Creating in control data
-#   ic_data <- rnorm(ic_sample_size)
-#   # bootstrap sample from that in control data to get distribution of test statistic
-#   in_control_tstat <- In_Control_Dist_CvM(ic_data=ic_data, m=5, bootstrap_samples=bootstrap_samples)
-#   # get mean of the distribution
-#   mean_ic_tstat <- mean(in_control_tstat)
-#   
-#   # Upper run limit depends on what ARL you want to estimate
-#   upper_run_limit <- 4000 
-#   runs <- 1000
-#   control_limit_candidates <- seq(lcl, ucl, length.out=num_candidates)
-#   
-#   # Pre-allocating
-#   x <- numeric(upper_run_limit)
-#   cc <- matrix(nrow = runs, ncol=num_candidates)
-#   
-#   # Get control limit estimates by using the bootstrapped in control distribution
-#   # for the test statistic
-#   
-#   for(i in 1:runs){
-#     x <- numeric(upper_run_limit)
-#     for(j in 2:upper_run_limit){
-#       tstat_chosen <- sample(in_control_tstat, 1)
-#       x[j] <- allowance_parameter * (tstat_chosen - mean_ic_tstat) + (1 - allowance_parameter)*x[j - 1]
-#     }
-#     cc[i,] <- sapply(control_limit_candidates, function(control_limit_candidates) min(which(x > control_limit_candidates)))
-#     #print(i/runs)
-#   }
-#   
-#   cc_means <- colMeans(cc)
-#   names(cc_means) <- control_limit_candidates
-#   
-#   plot(control_limit_candidates, cc_means)
-#   print("done!")
-#   cc_means
-# }
-
-
-

@@ -234,3 +234,10 @@ saveresults <- function(name){
   temptime <- gsub(":","", temptime)
   save.image(paste(name, temptime, ".RData", sep=""))
 }
+
+nameresults <- function(name){
+  # name is a string
+  temptime <- Sys.time()
+  temptime <- gsub(":","", temptime)
+  filename <- paste(name, "_", temptime, ".RData", sep="")
+}
