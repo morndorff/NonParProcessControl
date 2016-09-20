@@ -270,14 +270,16 @@ ad.res <- function(x,y, ...){
   if(is.numeric(y)){
     # From 'A two-sample Anderson-Darling rank statistic
     com <- c(x,y)
-    lenx <- length(x)
-    leny <- length(y)
+    lenx <- length(x) #n
+    leny <- length(y) #m
     len_com <- lenx + leny
     i <- 1:(len_com-1)
     fx <-ecdf(x)
-    M <- lenx *fx(sort(com))
+    M <- lenx * fx(sort(com))
+    print(M)
+    plot(M)
     M <- M[-len_com]
-    STAT <- 1/(lenx*leny)*sum((M * len_com -leny *i)^2/(i*(len_com-i)))
+    STAT <- 1/(lenx*leny)*sum((M * len_com -lenx *i)^2/(i*(len_com-i)))
     return(STAT)
   }
   
@@ -304,7 +306,24 @@ ad.res <- function(x,y, ...){
 }
 
 ad.check <- function(x,y, ...){
-  if(is.numeric(y)) stop("Not Done Yet")
+  if(is.numeric(y)){
+    # From 'A two-sample Anderson-Darling rank statistic
+    x <- sort(x)
+    y <- sort(y)
+    ranks(c(x,y))
+    
+    
+    com <- c(x,y)
+    lenx <- length(x)
+    leny <- length(y)
+    len_com <- lenx + leny
+    i <- 1:(len_com-1)
+    fx <-ecdf(x)
+    M <- lenx *fx(sort(com))
+    M <- M[-len_com]
+    STAT <- 1/(lenx*leny)*sum((M * len_com -leny *i)^2/(i*(len_com-i)))
+    return(STAT)
+  }
   # One Sample Variant First
   if (is.list(y)) 
     y <- names(y)

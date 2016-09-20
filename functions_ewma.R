@@ -63,6 +63,74 @@ CL_Finding_With_UB <- function(allow_param, cl_seq, f_in_control, sd_tol_init, C
   rownames(arl_track) <- as.character(c(upper.bound.ucl,cl_seq))
   return(arl_track)
 }
+EWMA_Find_CL_AD <- function(ic_data = rnorm(500),
+                             lambda = .05,
+                             control_limit = .06,
+                             m = 5,
+                             ICdist = "rnorm",
+                             IC_dist_ops = NULL,
+                             bootstrap_samples = 3000,
+                             track_candidates=NULL) {
+  # See below for track_candidates explanation
+  
+  # Calculate d0 via bootstrapping
+  d0 <- Fast_Bootstrap_AD(ic_data=ic_data, m=m, bootstrap_samples=bootstrap_samples)
+  
+  # Initializing Variables
+  data <- NULL
+  u <- 0 # initialize first value at 0
+  i <- 0
+  j <- 1:m
+  rIC <- get(ICdist, mode = "function", envir = parent.frame())
+  
+  # Pre Calculations for functions
+  sorted_ic_data <- sort(ic_data)
+  len_ic <- length(sorted_ic_data)  
+  len_com <- len_ic +m
+  ind <- 1:len_com
+  lenx_t_leny <- len_ic*m
+  while (tail(u, 1) < control_limit) {
+    i <- i + 1
+    data <- do.call(rIC, c(list(m), IC_dist_ops))
+    # Calculate new value of test statisic
+    D_n <- Fast_TS_AD(sorted_ic_data=sorted_ic_data, new_data=data, 
+                       lenx=len_ic, 
+                       i=ind, len_com=len_com, lenx_t_leny=lenx_t_leny)
+    # print(D_n)
+    u_nK <- lambda * (D_n - d0) + (1 - lambda) * tail(u, 1)
+    # print(paste("u=",u_nK))
+    u <- append(u, u_nK)
+  }
+  
+  # If we have a large upper bound, we can calculate all our upper bounds below that number
+  if(!is.null(track_candidates)){
+    track_ucl <-numeric(length(track_candidates))
+    
+    for(j in seq_along(track_candidates)){
+      track_ucl[j] <- as.numeric(which.min(track_candidates[j] > u)) - 1 #investigate later
+    }
+    names(track_ucl) <- as.character(track_candidates)
+    return(list("Time OOC"=i, "Lower CLs"=track_ucl))
+    
+  }
+  return(list("control_stats" = u, "Time OOC" = i))
+}
+
+
+Fast_TS_CVM <- function(sorted_ic_data, new_data, lenx, i, j, leny){
+  # Internal use ONLY 
+  ranks <- rank(c(sorted_ic_data, new_data))
+  U <- lenx * sum((ranks[1:lenx] - i)^2) + leny * sum((ranks[(lenx + 1):(lenx + leny)] - j)^2)
+  STAT <- U / ((lenx * leny)*(lenx + leny)) - (4 * leny * lenx - 1)/(6 * (leny + lenx))
+}
+
+
+Fast_TS_AD <- function(sorted_ic_data, new_data, lenx, i, len_com){
+  M <- lenx * f_ic(sort.int(c(sorted_ic_data, new_data))) # sort before?
+  M <- M[-len_com]
+  STAT <- 1/(lenx_t_leny)*sum((M * len_com -lenx *i)^2/(i*(len_com-i)))
+}
+
 
 EWMA_Find_CL_CVM <- function(ic_data = rnorm(500),
                               lambda = .05,
@@ -170,6 +238,9 @@ EWMA_Find_CL_KS <- function(ic_data = rnorm(500),
   return(list("control_stats" = u, "Time OOC" = i))
 }
 
+
+
+
 Fast_Bootstrap_CVM <- function(ic_data, m, bootstrap_samples){
   # This is inaccurate (5/5/2016)
   # Possibly because of ties
@@ -179,14 +250,14 @@ Fast_Bootstrap_CVM <- function(ic_data, m, bootstrap_samples){
   i <- 1:lenx
   leny <- m
   j <- 1:leny
+  lenx_t_leny <- lenx*leny
+  lenx_p_leny <- lenx+leny
+  
   for (k in 1:bootstrap_samples) {
     sampled_data <- sort.int(sample(ic_data, replace = T, size = m))
-    #sampled_data <- sampled_data + rnorm(m, 0, .01*sd_data)
-    #sampled_data <- rnorm(5)
-    #print(sampled_data)
     ranks <- rank(c(sort_ic, sampled_data))
-    U <- lenx * sum((ranks[1:lenx] - i)^2) + leny * sum((ranks[(lenx + 1):(lenx + leny)] - j)^2)
-    D_n[k] <- U / ((lenx * leny)*(lenx + leny)) - (4 * leny * lenx - 1)/(6 * (leny + lenx))
+    U <- lenx * sum((ranks[1:lenx] - i)^2) + leny * sum((ranks[(lenx + 1):lenx_p_leny] - j)^2)
+    D_n[k] <- U / ((lenx_t_leny)*(lenx_p_leny)) - (4 * lenx_t_leny - 1)/(6 * (lenx_p_leny))
   }
   d0 = mean(D_n)
 }
@@ -228,8 +299,7 @@ In_Control_Dist_CvM <- function(ic_data, m, bootstrap_samples){
 }
 
 In_Control_Dist_CvM_Exp <- function(ic_data, m, bootstrap_samples, ICdist, ic_params){
-  # This is inaccurate (5/5/2016)
-  # Possibly because of ties
+  # This is termed "experimental due to actually not simulating from the in-control distribution
   D_n <- numeric(bootstrap_samples)
   sort_ic <- sort(ic_data)
   lenx <- length(ic_data)
@@ -239,21 +309,64 @@ In_Control_Dist_CvM_Exp <- function(ic_data, m, bootstrap_samples, ICdist, ic_pa
 
   # Newly simulated data
   rIC <- get(ICdist, mode = "function", envir = parent.frame())
-  # new_data <- (lenx) # breaks upon usage of anything other than default params
-  # new_data <- do.call(ic_dist, c(list(lenx), ic_params)) 
+
 
   for(k in 1:bootstrap_samples) {
     sampled_data <- do.call(rIC, c(list(m), ic_params))  #NOW A MISNOMER
-    # sampled_data <- sort.int(sample(new_data, replace = T, size = m))
-    #sampled_data <- sampled_data + rnorm(m, 0, .01*sd_data)
-    #sampled_data <- rnorm(5)
-    #print(sampled_data)
     ranks <- rank(c(sort_ic, sampled_data))
     U <- lenx * sum((ranks[1:lenx] - i)^2) + leny * sum((ranks[(lenx + 1):(lenx + leny)] - j)^2)
     D_n[k] <- U / ((lenx * leny)*(lenx + leny)) - (4 * leny * lenx - 1)/(6 * (leny + lenx))
   }
   D_n
 }
+
+Fast_Bootstrap_AD <- function(ic_data, m, bootstrap_samples){
+  # This is inaccurate (5/5/2016)
+  # Possibly because of ties
+  D_n <- numeric(bootstrap_samples)
+  f_ic <- ecdf(ic_data)
+  sort_ic <- sort(ic_data)
+  lenx <- length(ic_data)
+  # i <- 1:lenx
+  leny <- m
+  # j <- 1:leny
+  len_com <- lenx + leny
+  i <- 1:(len_com - 1)
+  lenx_t_leny <- lenx * leny
+  for (k in 1:bootstrap_samples) {
+    sampled_data <- sort.int(sample(ic_data, replace = T, size = m))
+    M <- lenx * f_ic(sort.int(c(sort_ic, sampled_data))) # sort before?
+    M <- M[-len_com]
+    D_n[k] <- 1/(lenx_t_leny)*sum((M * len_com -lenx *i)^2/(i*(len_com-i)))
+  }
+  d0 = mean(D_n)
+}
+
+In_Control_Dist_AD_Exp <- function(ic_data, m, bootstrap_samples, ICdist, ic_params){
+  # This is termed "experimental due to actually not simulating from the in-control distribution
+  D_n <- numeric(bootstrap_samples)
+  f_ic <- ecdf(ic_data)
+  sort_ic <- sort(ic_data)
+  lenx <- length(ic_data)
+  # i <- 1:lenx
+  leny <- m
+  # j <- 1:leny
+  len_com <- lenx + leny
+  i <- 1:(len_com - 1)
+  lenx_t_leny <- lenx*len
+  
+  # Newly simulated data
+  rIC <- get(ICdist, mode = "function", envir = parent.frame())
+  
+  for(k in 1:bootstrap_samples) {
+    sampled_data <- do.call(rIC, c(list(m), ic_params))  #NOW A MISNOMER
+    M <- lenx * f_ic(sort.int(c(sort_ic, sampled_data))) # sort before?
+    M <- M[-len_com]
+    D_n[k] <- 1/(lenx_t_leny)*sum((M * len_com -lenx *i)^2/(i*(len_com-i)))
+  }
+  D_n
+}
+
 
 In_Control_Dist_KS_Exp <- function(ic_data, m, bootstrap_samples, ICdist, ic_params){
   # 
@@ -271,12 +384,7 @@ In_Control_Dist_KS_Exp <- function(ic_data, m, bootstrap_samples, ICdist, ic_par
 }
 
 
-Fast_TS_CVM <- function(sorted_ic_data, new_data, lenx, i, j, leny){
- # Internal use ONLY 
-  ranks <- rank(c(sorted_ic_data, new_data))
-  U <- lenx * sum((ranks[1:lenx] - i)^2) + leny * sum((ranks[(lenx + 1):(lenx + leny)] - j)^2)
-  STAT <- U / ((lenx * leny)*(lenx + leny)) - (4 * leny * lenx - 1)/(6 * (leny + lenx))
-}
+
 
 Fast_TS_KS <- function(ic_fun, new_data, j, m){
  # Internal use ONLY 
@@ -332,6 +440,51 @@ EWMA_CVM_OOC <- function(ic_data=rnorm(500), lambda=.05, control_limit, m=5, exa
 }
 
 
+
+EWMA_AD_OOC <- function(ic_data=rnorm(500), lambda=.05, control_limit, m=5, exact=FALSE, 
+                         tau=0, 
+                         ICdist="rnorm", IC_dist_ops=NULL,
+                         OOCdist="rnorm", OOC_dist_ops=NULL,
+                         bootstrap_samples=3000){
+  # TODO: Add multicore support
+  
+  # Calculate d0 via bootstrapping
+  d0 <- Fast_Bootstrap_AD(ic_data=ic_data, m=m, bootstrap_samples=bootstrap_samples)
+  
+  # Initializing Variables
+  data <- NULL
+  u <- 0
+  i <- 0
+  j <- 1:m
+  rOOC <- get(OOCdist, mode = "function", envir = parent.frame())
+  rIC <- get(ICdist, mode = "function", envir = parent.frame())
+  
+  # Pre Calculations for functions
+  sorted_ic_data <- sort(ic_data)
+  len_ic <- length(sorted_ic_data)  
+  len_com <- len_ic + m
+  ind <- 1:len_com
+  lenx_t_leny <- len_ic*m
+  
+  while (tail(u, 1) < control_limit) {
+    i <- i + 1
+    if(i <= tau){
+      data <-  do.call(rIC, c(list(m), IC_dist_ops) ) 
+      
+    }else{
+      data <- do.call(rOOC, c(list(m), OOC_dist_ops)) 
+    }
+    # Calculate new value of test statisic
+    D_n <- Fast_TS_AD(sorted_ic_data=sorted_ic_data, new_data=data, 
+                      lenx=len_ic, 
+                      i=ind, len_com=len_com, lenx_t_leny=lenx_t_leny)
+    # print(D_n)
+    u_nK <- lambda * (D_n - d0) + (1 - lambda) * tail(u, 1)
+    # print(paste("u=",u_nK))
+    u <- append(u, u_nK)
+  }
+  return(list("control_stats" = u, "Time OOC" = i))
+}
 
 EWMA_KS_OOC <- function(ic_data=rnorm(500), lambda=.05, control_limit, m=5, exact=FALSE, 
                          tau=0, 
