@@ -14,6 +14,8 @@ source("functions_uniform.R")
 source("functions_qiu.R")
 source("functions_package.R")
 source("functions_ewma.R")
+source("functions_prune.R")
+source("functions_densities.R")
 
 perm.test <- function(x, y, distops = NULL, f, fops = NULL, num.perm = 1501, diag = FALSE, 
                       exact = FALSE, out=FALSE, do.plot=FALSE, ...) {

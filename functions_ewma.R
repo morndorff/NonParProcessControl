@@ -11,44 +11,85 @@
 # Solution:
 # Use Switch Statements to Branch 
 
-CL_Finding_With_UB <- function(allow_param, cl_seq, f_in_control, sd_tol_init, Cores=4){
+CL_Finding_With_UB <- function(allow_param, 
+                               cl_seq, 
+                               f_in_control, 
+                               sd_tol_init, 
+                               Cores=4, 
+                               max_iter=5000,
+                               pval_approach=FALSE, ...){
   # allow_param = Allowance Parameter value
   # cl_seq = control limit sequence of values to be evaluated
   # f_in_control = What function to use
-  # INTERNAL USE ONLY
+  # pval_approach: if using apvalue approach, smaller limits
   # FOR NOW, SET N2, N2_MIN, ETC. OUTSIDE OF THE FUNCTION
   
-  N2_max <- 15000 # Run a maximum of this many times
+  N2_max <- max_iter # Run a maximum of this many times
   N2_min <- 500 # Run for at least 500 times
   
   upper.bound.ucl <- max(cl_seq)
   num_candidates <- length(cl_seq)
   
-  Iterations <- 0
-  sd_arl <- sd_tol_init + 1 
-  Num_Iter <- 5 * Cores
+  # Parallel processing
   require(doMC)
   require(foreach)
-  N2 <- 0 # At least 300 runs
+  Num_Iter <- 5 * Cores
+  
+  sd_arl <- sd_tol_init + 1  # setting while loop condition
+
   arl_track <- NULL
+  
+  # what limit will results in the largest arl?
+  if(pval_approach){
+    choose_cl <- min(cl_seq)
+  }else{
+    choose_cl <- max(cl_seq)
+  }
+  N2 <- 0
+
   while(sd_arl > sd_tol_init){
-    # print(paste("sd_arl was", sd_arl, "sd_tol_init was", sd_tol_init))
+    
     par_obj <- foreach(n=1:Num_Iter) %dopar%{
-      RLs <- f_in_control(control_limit=max(cl_seq), 
+      RLs <- f_in_control(control_limit=choose_cl, 
                           lambda=allow_param, 
                           m=m,
-                          ic_data=rdist(M),
-                          track_candidates = cl_seq)
+                          ic_data= do.call(rdist, c(list(M), ic_params)),
+                          track_candidates = cl_seq, 
+                          ...)
+      
       current_run_length <- RLs[["Time OOC"]]
-      names(current_run_length) <- as.character(upper.bound.ucl)
+      
+      names(current_run_length) <- as.character(choose_cl)
+      
       lower_cls <- RLs[["Lower CLs"]]
-      all_RLs <- c(current_run_length, lower_cls)
+
+      if(pval_approach){
+        # vector of run lengths for each control limit in sequence
+        all_RLs <- c(lower_cls) # on 10/20 confirmed this is correct
+      }else{
+        all_RLs <- c(current_run_length, lower_cls) # Is this an error? check later
+      }
     }
-    par_obj = matrix(unlist(par_obj), nrow=num_candidates+1, byrow=FALSE)
+    if(pval_approach){
+      par_obj = matrix(unlist(par_obj), nrow=num_candidates, byrow=FALSE)
+      
+    }else{
+      par_obj = matrix(unlist(par_obj), nrow=num_candidates + 1, byrow=FALSE)
+      
+    }
     arl_track <- cbind(arl_track, par_obj) # arl_track is now a matrix
     N2 <- N2 + Num_Iter
-    sd_arl <- sd(arl_track[1, ])* 1.96 / sqrt(N2) # First row contains most relevent info
-    arl_est <- mean(arl_track[1, ] ) 
+    
+    if(pval_approach){
+      arl_est <- mean(arl_track[dim(arl_track)[1], ] )    
+      sd_arl <- sd(arl_track[dim(arl_track)[1], ])* 1.96 / sqrt(N2) # First row contains most relevent info
+      
+    }else{
+      arl_est <- mean(arl_track[1, ] )      
+      sd_arl <- sd(arl_track[1, ])* 1.96 / sqrt(N2) # First row contains most relevent info
+      
+    }
+
     
     if(is.na(sd_arl)) sd_arl <- sd_tol_init + 1
     
@@ -60,9 +101,17 @@ CL_Finding_With_UB <- function(allow_param, cl_seq, f_in_control, sd_tol_init, C
       print(sd_arl)
     }
   }
-  rownames(arl_track) <- as.character(c(upper.bound.ucl,cl_seq))
+  if(pval_approach){
+    rownames(arl_track) <- as.character(cl_seq)
+    
+  }else{
+    rownames(arl_track) <- as.character(c(upper.bound.ucl,cl_seq))
+    
+  }
+
   return(arl_track)
 }
+
 EWMA_Find_CL_AD <- function(ic_data = rnorm(500),
                              lambda = .05,
                              control_limit = .06,
@@ -87,14 +136,15 @@ EWMA_Find_CL_AD <- function(ic_data = rnorm(500),
   sorted_ic_data <- sort(ic_data)
   len_ic <- length(sorted_ic_data)  
   len_com <- len_ic +m
-  ind <- 1:len_com
+  ind <- 1:(len_com-1)
   lenx_t_leny <- len_ic*m
+  f_ic <- ecdf(sorted_ic_data)
   while (tail(u, 1) < control_limit) {
     i <- i + 1
     data <- do.call(rIC, c(list(m), IC_dist_ops))
     # Calculate new value of test statisic
     D_n <- Fast_TS_AD(sorted_ic_data=sorted_ic_data, new_data=data, 
-                       lenx=len_ic, 
+                       lenx=len_ic, f_ic=f_ic,
                        i=ind, len_com=len_com, lenx_t_leny=lenx_t_leny)
     # print(D_n)
     u_nK <- lambda * (D_n - d0) + (1 - lambda) * tail(u, 1)
@@ -124,8 +174,7 @@ Fast_TS_CVM <- function(sorted_ic_data, new_data, lenx, i, j, leny){
   STAT <- U / ((lenx * leny)*(lenx + leny)) - (4 * leny * lenx - 1)/(6 * (leny + lenx))
 }
 
-
-Fast_TS_AD <- function(sorted_ic_data, new_data, lenx, i, len_com){
+Fast_TS_AD <- function(sorted_ic_data, new_data, lenx, i, len_com, lenx_t_leny, f_ic){
   M <- lenx * f_ic(sort.int(c(sorted_ic_data, new_data))) # sort before?
   M <- M[-len_com]
   STAT <- 1/(lenx_t_leny)*sum((M * len_com -lenx *i)^2/(i*(len_com-i)))
@@ -353,7 +402,7 @@ In_Control_Dist_AD_Exp <- function(ic_data, m, bootstrap_samples, ICdist, ic_par
   # j <- 1:leny
   len_com <- lenx + leny
   i <- 1:(len_com - 1)
-  lenx_t_leny <- lenx*len
+  lenx_t_leny <- lenx*leny
   
   # Newly simulated data
   rIC <- get(ICdist, mode = "function", envir = parent.frame())
@@ -463,9 +512,9 @@ EWMA_AD_OOC <- function(ic_data=rnorm(500), lambda=.05, control_limit, m=5, exac
   sorted_ic_data <- sort(ic_data)
   len_ic <- length(sorted_ic_data)  
   len_com <- len_ic + m
-  ind <- 1:len_com
+  ind <- 1:(len_com-1)
   lenx_t_leny <- len_ic*m
-  
+  f_ic <- ecdf(sorted_ic_data)
   while (tail(u, 1) < control_limit) {
     i <- i + 1
     if(i <= tau){
@@ -477,7 +526,7 @@ EWMA_AD_OOC <- function(ic_data=rnorm(500), lambda=.05, control_limit, m=5, exac
     # Calculate new value of test statisic
     D_n <- Fast_TS_AD(sorted_ic_data=sorted_ic_data, new_data=data, 
                       lenx=len_ic, 
-                      i=ind, len_com=len_com, lenx_t_leny=lenx_t_leny)
+                      i=ind, len_com=len_com, lenx_t_leny=lenx_t_leny, f_ic=f_ic)
     # print(D_n)
     u_nK <- lambda * (D_n - d0) + (1 - lambda) * tail(u, 1)
     # print(paste("u=",u_nK))

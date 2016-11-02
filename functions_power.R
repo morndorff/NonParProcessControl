@@ -220,7 +220,7 @@ perm.test2 <- function(x, y, distops = NULL, f, fops = NULL, num.perm = 2001, di
   }
 }
 
-cvm.res <- function(x, y, ..., test=FALSE){
+cvm.res <- function(x, y, ...){
   # x: numeric vector
   # y: numeric vector or prob distribution e.g. "pnorm" 
   if (is.numeric(x) != TRUE) 
@@ -254,13 +254,6 @@ cvm.res <- function(x, y, ..., test=FALSE){
   F_x <- y(x, ...)
   i <- 1:lenx
   STAT <- (1/(12*lenx)) + sum( (F_x -(1:lenx - .5)/ lenx)^2)
-  if(test){
-    # print(F_x)
-    # print(F_x - (1:lenx -.5)/lenx)
-    # return(F_x - (1:lenx -.5)/lenx)
-    STAT <- (1/(12*lenx)) + sum((F_x - (1:lenx - .5)/lenx)^2)
-    return(STAT)
-  }
   STAT
 }
 
@@ -276,8 +269,6 @@ ad.res <- function(x,y, ...){
     i <- 1:(len_com-1)
     fx <-ecdf(x)
     M <- lenx * fx(sort(com))
-    print(M)
-    plot(M)
     M <- M[-len_com]
     STAT <- 1/(lenx*leny)*sum((M * len_com -lenx *i)^2/(i*(len_com-i)))
     return(STAT)
@@ -300,6 +291,7 @@ ad.res <- function(x,y, ...){
   S <- 0
   for(i in 1:lenx){
     S <- (2 * i - 1) * (ln_F_x[i] + log(1 - F_x[lenx + 1 -i])) + S
+    # print(S) # delete later
   }
   S <- S/lenx
   STAT <- -lenx - S
@@ -345,3 +337,91 @@ ad.check <- function(x,y, ...){
   STAT
 }
 
+ad.weighted <- function(x, y, w, ...){
+  # Calculates "A"
+  # Two Sample
+  if(is.numeric(y)){
+    # Two Sample test not yet weighted
+    stop("Two Sample Version Not Yet Coded for weighting")
+    
+  }
+  # One Sample Variant First
+  if (is.list(y)) 
+    y <- names(y)
+  if (is.function(y)) 
+    funname <- as.character(substitute(y))
+  if (is.character(y)) 
+    funname <- y
+  y <- get(funname, mode = "function", envir = parent.frame())
+  if (!is.function(y)) 
+    stop("'y' must be numeric or a function or a string naming a valid function")
+  # print(x)
+  # print(w)
+  xind <- order(x)
+  lenx <- length(x)
+  x <- x[xind]
+  w <- w[xind]
+  # print(x)
+  # print(w)
+  # unnecessary if already sum to 1
+  sumw <- sum(w)
+  w <- w/sumw * lenx
+  F_x <- y(x, ...)
+
+  ln_F_x <- log(F_x)
+  S <- 0
+  for(i in 1:lenx){
+    S <- w[i]*(2 * i - 1) * (ln_F_x[i] + log(1 - F_x[lenx + 1 -i])) + S
+    print(ln_F_x)
+    print(S)
+  }
+  S <- S/lenx
+  STAT <- -lenx - S
+}
+
+
+cvm.res.weight <- function(x, y, w, ...){
+  # x: numeric vector
+  # y: numeric vector or prob distribution e.g. "pnorm" 
+  if (is.numeric(x) != TRUE) 
+    stop("x must be numeric")
+  x <- sort(x)
+  lenx <- length(x)
+  # Two Sample Test
+  if (is.numeric(y)) {
+    x <- sort(x)
+    y <- sort(y)
+    leny <- length(y)
+    # com <- c(x,y)
+    # ranks <- rank(com)
+    # lenx <- length(x)
+    # leny <- length(y)
+    # i <- 1:lenx
+    # j <- 1:leny
+    # # diagnostic 
+    # print((ranks[1:lenx] - i)^2) + leny * sum((ranks[(lenx + 1):(lenx + leny)] - j)^2)
+    # plot((ranks[1:lenx] - i)^2) + leny * sum((ranks[(lenx + 1):(lenx + leny)] - j)^2)
+    # U <- lenx * sum((ranks[1:lenx] - i)^2) + leny * sum((ranks[(lenx + 1):(lenx + leny)] - j)^2)
+    # STAT <- U / ((lenx * leny)*(lenx + leny)) - (4 * leny * lenx - 1)/(6 * (leny + lenx))
+    # print(((lenx * leny)*(lenx + leny)) - (4 * leny * lenx - 1)/(6 * (leny + lenx)))
+    f_ic <- ecdf(x)
+    f_new <- ecdf(y)
+    change <- sum((f_ic(y)-f_new(y))^2) + sum((f_ic(x)-f_new(x))^2) #lol how do I normalize
+    change <- change * (lenx * leny)/(lenx + leny)^2
+    return(STAT)
+  }
+  # One Sample Test  
+  if (is.list(y)) 
+    y <- names(y)
+  if (is.function(y)) 
+    funname <- as.character(substitute(y))
+  if (is.character(y)) 
+    funname <- y
+  y <- get(funname, mode = "function", envir = parent.frame())
+  if (!is.function(y)) 
+    stop("'y' must be numeric or a function or a string naming a valid function")
+  F_x <- y(x, ...)
+  i <- 1:lenx
+  STAT <- (1/(12*lenx)) + sum( (F_x -(1:lenx - .5)/ lenx)^2)
+  STAT
+}
