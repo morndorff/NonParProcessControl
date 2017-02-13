@@ -95,7 +95,8 @@ CL_Finding_With_UB <- function(allow_param,
     
     if(N2 < N2_min) sd_arl <- sd_tol_init + 1
     if(N2 > N2_max) sd_arl <- sd_tol_init - 1 # goes to far, just need to cut it off
-    if(N2 %% 40==0){
+    if(N2 %% 2==0){
+      # temporary
       print(N2)
       print(arl_est)
       print(sd_arl)
@@ -175,9 +176,251 @@ Fast_TS_CVM <- function(sorted_ic_data, new_data, lenx, i, j, leny){
 }
 
 Fast_TS_AD <- function(sorted_ic_data, new_data, lenx, i, len_com, lenx_t_leny, f_ic){
+  # form new_data cdf
   M <- lenx * f_ic(sort.int(c(sorted_ic_data, new_data))) # sort before?
   M <- M[-len_com]
   STAT <- 1/(lenx_t_leny)*sum((M * len_com -lenx *i)^2/(i*(len_com-i)))
+}
+
+Slow_AD_Two_Sample = function(x,y){
+  m = length(y)
+  n = length(x)
+  N = m + n
+  sortx = sort(x)
+  combined.sample.sorted = sort(c(x,y))
+  A_n = 0
+  M = numeric(N-1)
+  for(i in 1:(N-1)){
+    M = sum(sortx <=combined.sample.sorted[i])
+    A_n = (M*N - n*i)^2/(i*(N-i)) + A_n
+  }
+  M
+  A_n = A_n/(m*n)
+  #print(A_n)
+  A_n
+
+}
+
+
+Fast_TS_AD_Rev = function(sorted_ic_data, y, m, n, N ){
+  # m = length(y)
+  # n = length(x)
+  # N = m + n
+  # sortx = sort(x)
+  combined.sample.sorted = sort(c(sorted_ic_data,y))
+  A_n = 0
+  M = numeric(N-1)
+  for(i in 1:(N-1)){
+    M = sum(sorted_ic_data <=combined.sample.sorted[i]) # potentially doing way more than needed
+    A_n = (M*N - n*i)^2/(i*(N-i)) + A_n
+  }
+  M
+  A_n = A_n/(m*n)
+  #print(A_n)
+  A_n
+  
+}
+
+Find_CL_AD_Window <- function(ic_data = rnorm(500),
+                                   lambda = 30,
+                                   control_limit = .06,
+                                   m = 5,
+                                   ICdist = "rnorm",
+                                   IC_dist_ops = NULL,
+                                   method="constant_ad",
+                                   track_candidates=NULL) {
+  # See below for track_candidates explanation
+  
+  # Calculate d0 via bootstrapping
+  # d0 <- Fast_Bootstrap_CVM(ic_data=ic_data, m=m, bootstrap_samples=bootstrap_samples)
+  # Mean of A_mn = 1
+  chosen_window=lambda
+  
+  # Initializing Variables
+  data <- NULL
+  u <- 0 # initialize first value at 0
+  j <- 1:m
+  rIC <- get(ICdist, mode = "function", envir = parent.frame())
+  
+  # Pre Calculations for functions
+  sorted_ic_data <- sort(ic_data)
+  len_ic <- length(sorted_ic_data)
+  ind <- 1:len_ic
+  SD_A2= sqrt((2/3)*(pi^2 - 9))
+  
+  # bootstrap for initial 3 variances
+  # var_correct_samp = 3
+  # ad.sd = numeric(3)
+  # 
+  # for(i in 1:var_correct_samp){
+  #   ad.boot = numeric(200)
+  #   for(j in 1:1000){
+  #     b.samp = sample(sorted_ic_data, m*i)
+  #     ad.boot[j] =Fast_TS_AD_Rev(sorted_ic_data=sorted_ic_data, y=b.samp, 
+  #                                m = m*i, 
+  #                                n = len_ic, 
+  #                                N = len_ic + m*i)
+  #   }
+  #   ad.sd[i] = sd(ad.boot)
+  # }
+  # print(ad.sd)
+  i <- 1
+  
+  while (tail(u, 1) < control_limit) {
+    
+    new_data <- do.call(rIC, c(list(m), IC_dist_ops))
+    data <- cbind(data, new_data) # master data
+    num_active_batches <- dim(data)[2]
+    amt_data = num_active_batches*m
+    
+    STAT <- Fast_TS_AD_Rev(sorted_ic_data=sorted_ic_data, y=data, 
+                           m = amt_data, 
+                           n = len_ic, N =len_ic + amt_data) 
+    #print(STAT)
+    #print("hello")
+    if(amt_data <= 20){
+      STAT.Standard = STAT / SD_A2   # ad.sd[i]
+    }else{
+      STAT.Standard = STAT/ SD_A2
+    }
+    
+    u_nK <- STAT.Standard - 1  # 1 = mean of A_mn
+    
+    # lambda * (D_n - d0) + (1 - lambda) * tail(u, 1)
+    # print(paste("u=",u_nK))
+    u <- append(u, u_nK)
+    
+    # num_keep <- chosen_window
+    # store_keep <- append(store_keep, num_keep)
+    # store_remove <- append(store_remove, num_remove)
+    # print(paste("On Batch", i))
+    # print(paste("Number removed equals ", num_remove))
+    # print(paste("Amount of batches used equals ", num_keep))
+    if(num_active_batches > chosen_window){
+      data = data[,-1]
+    }
+    print(num_active_batches)
+    i <- i + 1
+  }
+  
+  i = i - 1
+  
+  # If we have a large upper bound, we can calculate all our upper bounds below that number
+  if(!is.null(track_candidates)){
+    track_ucl <-numeric(length(track_candidates))
+    
+    for(j in seq_along(track_candidates)){
+      track_ucl[j] <- as.numeric(which.min(track_candidates[j] > u)) - 1 #investigate later
+    }
+    names(track_ucl) <- as.character(track_candidates)
+    return(list("Time OOC"=i, "Lower CLs"=track_ucl))
+    
+  }
+  return(list("control_stats" = u, "Time OOC" = i))
+}
+
+
+Find_CL_AD_Window_OOC <- function(ic_data = rnorm(500),
+                                   lambda = 30,
+                                   control_limit = .06,
+                                   m = 5,
+                                   ICdist = "rnorm", IC_dist_ops = NULL,
+                                   OOCdist="rnorm", OOC_dist_ops=NULL, tau=0,
+                                  method="constant_ad"
+                                   ) {
+  # See below for track_candidates explanation
+  
+  # Calculate d0 via bootstrapping
+  # d0 <- Fast_Bootstrap_CVM(ic_data=ic_data, m=m, bootstrap_samples=bootstrap_samples)
+  # Mean of A_mn = 1
+  chosen_window=lambda
+  
+  # Initializing Variables
+  data <- NULL
+  u <- 0 # initialize first value at 0
+  j <- 1:m
+  rIC <- get(ICdist, mode = "function", envir = parent.frame())
+  rOOC <- get(OOCdist, mode = "function", envir = parent.frame())
+  
+  # Pre Calculations for functions
+  sorted_ic_data <- sort(ic_data)
+  len_ic <- length(sorted_ic_data)
+  ind <- 1:len_ic
+  SD_A2= sqrt((2/3)*(pi^2 - 9))
+  
+  # bootstrap for initial 3 variances
+  # var_correct_samp = 3
+  # ad.sd = numeric(3)
+  # 
+  # for(i in 1:var_correct_samp){
+  #   ad.boot = numeric(200)
+  #   for(j in 1:1000){
+  #     b.samp = sample(sorted_ic_data, m*i)
+  #     ad.boot[j] =Fast_TS_AD_Rev(sorted_ic_data=sorted_ic_data, y=b.samp, 
+  #                                m = m*i, 
+  #                                n = len_ic, 
+  #                                N = len_ic + m*i)
+  #   }
+  #   ad.sd[i] = sd(ad.boot)
+  # }
+  # print(ad.sd)
+  i <- 1
+  
+  while (tail(u, 1) < control_limit) {
+    if(i <= tau){
+      new_data <-  do.call(rIC, c(list(m), IC_dist_ops) ) 
+      
+    }else{
+      new_data <- do.call(rOOC, c(list(m), OOC_dist_ops)) 
+    }
+    data <- cbind(data, new_data) # master data
+    num_active_batches <- dim(data)[2]
+    amt_data = num_active_batches*m
+    
+    STAT <- Fast_TS_AD_Rev(sorted_ic_data=sorted_ic_data, y=data, 
+                           m = amt_data, 
+                           n = len_ic, N =len_ic + amt_data) 
+    #print(STAT)
+    #print("hello")
+    if(amt_data <= 20){
+      STAT.Standard = STAT / SD_A2   # ad.sd[i]
+    }else{
+      STAT.Standard = STAT/ SD_A2
+    }
+    
+    u_nK <- STAT.Standard - 1  # 1 = mean of A_mn
+    
+    # lambda * (D_n - d0) + (1 - lambda) * tail(u, 1)
+    # print(paste("u=",u_nK))
+    u <- append(u, u_nK)
+    
+    # num_keep <- chosen_window
+    # store_keep <- append(store_keep, num_keep)
+    # store_remove <- append(store_remove, num_remove)
+    # print(paste("On Batch", i))
+    # print(paste("Number removed equals ", num_remove))
+    # print(paste("Amount of batches used equals ", num_keep))
+    if(num_active_batches > chosen_window){
+      data = data[,-1]
+    }
+    print(num_active_batches)
+    i <- i + 1
+  }
+  
+  
+  i = i - 1
+  # # If we have a large upper bound, we can calculate all our upper bounds below that number
+  # if(!is.null(track_candidates)){
+  #   track_ucl <-numeric(length(track_candidates))
+  #   
+  #   for(j in seq_along(track_candidates)){
+  #     track_ucl[j] <- as.numeric(which.min(track_candidates[j] > u)) - 1 #investigate later
+  #   }
+  #   names(track_ucl) <- as.character(track_candidates)
+  #   return(list("Time OOC"=i, "Lower CLs"=track_ucl))
+  #   
+  # }
+  return(list("control_stats" = u, "Time OOC" = i))
 }
 
 
@@ -310,6 +553,8 @@ Fast_Bootstrap_CVM <- function(ic_data, m, bootstrap_samples){
   }
   d0 = mean(D_n)
 }
+
+
 
 
 Fast_Bootstrap_KS <- function(ic_data, m, bootstrap_samples){

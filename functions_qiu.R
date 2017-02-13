@@ -989,3 +989,166 @@ rmixnorm <- function(N, u, s, probs) {
   components <- sample(1:len_param, prob=probs, size=N, replace=TRUE)
   samples <- rnorm(n=N, mean=u[components], sd=s[components])
 }
+
+
+Ross_OOC_ARL = function(ic_data=rnorm(500), 
+                        lambda=NULL, 
+                        control_limit=NULL, 
+                        m=5, 
+                        tau=0, 
+                        ICdist="rnorm", IC_dist_ops=NULL,
+                        OOCdist="rnorm", OOC_dist_ops=NULL,
+                        method="Ross",
+                        ARL=200){
+  require(cpm)
+  if(method=="Ross") method="Cramer-von-Mises"
+  M =length(ic_data)
+  
+  rOOC <- get(OOCdist, mode = "function", envir = parent.frame())
+  rIC <- get(ICdist, mode = "function", envir = parent.frame())
+  
+  i <- 1
+  ic_tau = do.call(rIC, c(n=list(tau*m), IC_dist_ops))
+  
+  new_data = c(ic_data, ic_tau, do.call(rOOC, c(n=list(1000), OOC_dist_ops)))
+  Detect_Time = detectChangePoint(new_data, cpmType="Cramer-von-Mises", ARL0=ARL, startup=M, lambda=NA) 
+  Change_Detected=Detect_Time$changeDetected
+  while(Change_Detected==FALSE){
+    if(tau > 1000) stop("tau too big")
+    new_data = c(new_data, do.call(rOOC, c(n=list(1000), OOC_dist_ops)))
+    Detect_Time = detectChangePoint(new_data, cpmType=method, ARL0=ARL, startup=M, lambda=NA) 
+    Change_Detected = Detect_Time$changeDetected
+  }
+  OOC_Time = ceiling((Detect_Time$detectionTime - M)/m) - tau
+  return(list("Time OOC" = OOC_Time))
+}
+
+
+Find_N_CUSUM_ARL = function(ic_data = rnorm(500),
+                            lambda = .1,
+                            control_limit = 8,
+                            m = 5,
+                            ICdist = "rnorm",
+                            IC_dist_ops = NULL,
+                            bootstrap_samples = 3000,
+                            track_candidates=NULL,
+                            method="N-CUSUM"
+                            ){
+  if(method=="N-CUSUM"){
+    ic_mean = mean(ic_data)
+  }else if(method=="SD-CUSUM"){
+    ic_sd = sd(ic_data)
+  }
+  ucl = control_limit
+  lcl = -control_limit
+  u_pos <- 0
+  u_neg <- 0 # Initialize u at 0
+  i <- 1
+  
+  while(tail(u_neg, 1) > lcl && tail(u_pos, 1) < ucl) {
+    data <- do.call(ICdist, c(list(m), IC_dist_ops))
+    
+    if(method=="N-CUSUM"){
+      data.mean = mean(data)
+    
+      u_pos_k <- max(0, tail(u_pos, 1) + (data.mean -ic_mean) - lambda)
+      u_neg_k = min(0, tail(u_neg, 1) + (data.mean -ic_mean) + lambda)
+    }else if(method=="SD-CUSUM"){
+      data.sd = sd(data)
+      
+      u_pos_k <- max(0, tail(u_pos, 1) + (data.sd -ic_sd) - lambda)
+      u_neg_k = min(0, tail(u_neg, 1) + (data.sd -ic_sd) + lambda)
+      
+    }
+    u_pos <- append(u_pos, u_pos_k)
+    u_neg <- append(u_neg, u_neg_k)
+    i <- i + 1
+  }
+  # which triggered condition?
+
+  i = i -1 #adjustment
+  
+  # If we have a large upper bound, we can calculate all our upper bounds below that number
+  if(!is.null(track_candidates)){
+    if(-ucl!=lcl) stop("this is not valid")
+    track_ucl <-numeric(length(track_candidates))
+    
+    u = matrix(c(u_pos, u_neg) , ncol=length(u_pos), byrow=TRUE)
+    u_abs = apply(u, 2, function(x) max(abs(x)))
+    for(j in seq_along(track_candidates)){
+      # for a particular candidate, see where things were triggered.
+      # complication for upper and lower control limits
+      #print(which.min(track_candidates[j] > u_pos))
+
+      # track_upper[j] <- as.numeric(which.min(track_candidates[j] > u_pos)) - 1 #investigate later
+      # if(track_upper[j] ==0) track_upper[j] = NA
+      # track_lower[j] <- as.numeric(which.min(-track_candidates[j] < u_neg)) - 1 #investigate later
+      # if(track_lower[j] ==0) track_lower[j] = NA
+      
+      track_ucl[j] = as.numeric(which.min(track_candidates[j] > u_abs)) - 1
+      
+      # track_ucl[j] = max(track_upper[j], track_lower[j], na.rm=TRUE)
+      
+      # track_ucl[j] <- as.numeric(which.min(track_candidates[j] > u)) - 1 #investigate later
+    }
+
+    names(track_ucl) <- as.character(track_candidates)
+    return(list("Time OOC"=i, "Lower CLs"=track_ucl))
+    
+  }
+  
+  return(list("Time OOC" = i, "control_stats"= list("pos"=u_pos, "neg"=u_neg), "method"=method) )
+}
+
+CUSUM_OOC_ARL = function(ic_data=rnorm(500), 
+                        lambda=NULL, 
+                        control_limit=NULL, 
+                        m=5, 
+                        tau=0, 
+                        ICdist="rnorm", IC_dist_ops=NULL,
+                        OOCdist="rnorm", OOC_dist_ops=NULL,
+                        method="N-CUSUM"){
+  rOOC <- get(OOCdist, mode = "function", envir = parent.frame())
+  rIC <- get(ICdist, mode = "function", envir = parent.frame())
+  
+  if(method=="N-CUSUM"){
+    ic_mean = mean(ic_data)
+  }else if(method=="SD-CUSUM"){
+    ic_sd = sd(ic_data)
+  }
+  
+  ucl = control_limit
+  lcl = -control_limit
+  u_pos <- 0
+  u_neg <- 0 # Initialize u at 0
+  i <- 1
+
+  while(tail(u_neg, 1) > lcl && tail(u_pos, 1) < ucl) {
+
+    if(i <= tau){
+      data <- do.call(rIC, c(list(m), IC_dist_ops))
+    }else{
+      data <- do.call(rOOC, c(list(m), OOC_dist_ops)) 
+    }
+    if(method=="N-CUSUM"){
+      data.mean = mean(data)
+      
+      u_pos_k <- max(0, tail(u_pos, 1) + (data.mean -ic_mean) - lambda)
+      u_neg_k = min(0, tail(u_neg, 1) + (data.mean -ic_mean) + lambda)
+    }else if(method=="SD-CUSUM"){
+      data.sd = sd(data)
+      u_pos_k <- max(0, tail(u_pos, 1) + (data.sd -ic_sd) - lambda)
+      u_neg_k = min(0, tail(u_neg, 1) + (data.sd -ic_sd) + lambda)
+      
+    }
+    u_pos <- append(u_pos, u_pos_k)
+    u_neg <- append(u_neg, u_neg_k)
+    i <- i + 1
+  }
+  i = i -1 #adjustment
+  
+  return(list("Time OOC" = i, "control_stats"= list("pos"=u_pos, "neg"=u_neg)))
+}
+
+
+

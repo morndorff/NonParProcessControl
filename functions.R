@@ -16,6 +16,8 @@ source("functions_package.R")
 source("functions_ewma.R")
 source("functions_prune.R")
 source("functions_densities.R")
+source("functions_prune_adapt.R")
+source("functions_weight.R")
 
 perm.test <- function(x, y, distops = NULL, f, fops = NULL, num.perm = 1501, diag = FALSE, 
                       exact = FALSE, out=FALSE, do.plot=FALSE, ...) {

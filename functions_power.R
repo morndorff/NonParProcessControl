@@ -422,6 +422,9 @@ cvm.res.weight <- function(x, y, w, ...){
     stop("'y' must be numeric or a function or a string naming a valid function")
   F_x <- y(x, ...)
   i <- 1:lenx
-  STAT <- (1/(12*lenx)) + sum( (F_x -(1:lenx - .5)/ lenx)^2)
+  # November update. Need to get weighting right here
+  
+  STAT <- (1/(12*lenx)) + sum( (F_x - F_yw(x) / lenx)^2)
+  # STAT <- (1/(12*lenx)) + sum( (F_x -(1:lenx - .5)/ lenx)^2) old
   STAT
 }
